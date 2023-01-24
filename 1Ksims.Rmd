@@ -1,0 +1,294 @@
+---
+title: "1K generations isolation, test fixed diffs"
+author: "Devon DeRaad"
+date: '2023-01-23'
+output: html_document
+---
+
+```{r, message=FALSE}
+library(slendr)
+library(ggtree)
+library(adegenet)
+library(StAMPP)
+library(vcfR)
+library(ggplot2)
+library(introgress)
+library(SNPfiltR)
+```
+
+### define function to calculate fixed differences given downsampling values
+```{r}
+assess_fixed_diffs <- function(geno.matrix=NULL, pop1.sample.num=NULL, pop2.sample.num=NULL){
+#convert matrix to numeric
+conv.mat<-geno.matrix
+conv.mat[conv.mat == "0/0"]<-0
+conv.mat[conv.mat == "0/1"]<-1
+conv.mat[conv.mat == "1/0"]<-1
+conv.mat[conv.mat == "1/1"]<-2
+#table(conv.mat)
+#convert to data.frame
+conv.mat<-as.data.frame(conv.mat)
+#convert columns to numeric
+conv.mat[] <- sapply(conv.mat, as.numeric)
+
+#calc AF for the derived allele (arbitrarily defined as genotypes labeled in the GT matrix 2) for samples you will use to call fixed differences
+#identify each set of samples
+pop1.samps<-colnames(conv.mat)[gsub("_.*","", colnames(conv.mat)) == "pop1"]
+pop2.samps<-colnames(conv.mat)[gsub("_.*","", colnames(conv.mat)) == "pop2"]
+
+#define boolean vectors to isolate each pop from the columns of the dataframe with short, understandable variable names
+p1<-colnames(conv.mat) %in% pop1.samps
+p2<-colnames(conv.mat) %in% pop2.samps
+
+#calculate allele frequency in each parental pop
+pop1.af<-(rowSums(conv.mat[,p1], na.rm=T)/(rowSums(is.na(conv.mat[,p1]) == FALSE)))/2
+pop2.af<-(rowSums(conv.mat[,p2], na.rm=T)/(rowSums(is.na(conv.mat[,p2]) == FALSE)))/2
+
+#find fixed SNPs
+diff.true<-abs(pop1.af - pop2.af)
+
+#table(diff.true == 1)
+xx<-sum(diff.true ==1)
+hist(diff.true, main=paste0("divergence landscape, ",xx," fixed differences"), xlab="AF difference between parental pops", breaks=50)
+
+#introduce optional downsampling here:
+if(is.null(pop1.sample.num) && is.null(pop1.sample.num)){break}
+else{
+  #do 100 replicates of the specified downsampling and viz the distribution of # of fixed differences called
+  dd<-c()
+  fx<-c()
+  diffs<-c()
+  for (i in 1:200){
+    pop1.downsamped<-sample(pop1.samps, pop1.sample.num, replace = F)
+    pop2.downsamped<-sample(pop2.samps, pop2.sample.num, replace = F)
+    #trim matrix based on optional downsampling
+    sub.mat<-conv.mat[,colnames(conv.mat) %in% pop1.downsamped | colnames(conv.mat) %in% pop2.downsamped]
+    #identify parentals in trimmed matrix
+    p1<-colnames(sub.mat) %in% colnames(sub.mat)[gsub("_.*","", colnames(sub.mat)) == "pop1"]
+    p2<-colnames(sub.mat) %in% colnames(sub.mat)[gsub("_.*","", colnames(sub.mat)) == "pop2"]
+    #calculate allele frequency in each parental pop
+    pop1.af<-(rowSums(sub.mat[,p1], na.rm=T)/(rowSums(is.na(sub.mat[,p1]) == FALSE)))/2
+    pop2.af<-(rowSums(sub.mat[,p2], na.rm=T)/(rowSums(is.na(sub.mat[,p2]) == FALSE)))/2
+
+    #find fixed SNPs
+    diff<-abs(pop1.af - pop2.af)
+    #store number of fixed differences for this iteration
+    fx[i]<-sum(diff == 1)
+    #calc and store the proportion of those that are false positives
+    dd[i]<-(sum(diff == 1)-xx)/sum(diff == 1)
+    #store the actual allele freuqency difference of called putative fixed differences
+    diffs<-c(diffs,diff.true[diff == 1])
+  }
+  #make histogram of # of called diffs 
+  hist(dd, breaks=30, xlab="proportion of false positive called putative fixed differences", main=paste0("Mean called fixed diffs (200 reps) = ",round(mean(fx),2),", samples: pop1 = ",pop1.sample.num,", pop2 = ",pop2.sample.num))
+  hist(diffs, xlab="allele frequency difference", main="true AF difference for putative called fixed differences",breaks=30)
+  abline(v=mean(diffs), col="red", lty="dashed")
+  }
+}
+```
+
+### define function to downsample matrix and create triangle plot
+```{r}
+#input file must be vcfR object where input samples are designated to populations with one of three sample label prefixes, pop1_, pop2_, or hybrid_
+make_tri_plot <- function(geno.matrix=NULL, pop1.sample.num=NULL, pop2.sample.num=NULL, hybrid.sample.num=NULL){
+#convert matrix to numeric
+conv.mat<-geno.matrix
+conv.mat[conv.mat == "0/0"]<-0
+conv.mat[conv.mat == "0/1"]<-1
+conv.mat[conv.mat == "1/0"]<-1
+conv.mat[conv.mat == "1/1"]<-2
+#table(conv.mat)
+#convert to data.frame
+conv.mat<-as.data.frame(conv.mat)
+#convert columns to numeric
+conv.mat[] <- sapply(conv.mat, as.numeric)
+#table(is.na(conv.mat))
+
+#calc AF for the derived allele (arbitrarily defined as genotypes labeled in the GT matrix 2) for samples you will use to call fixed differences
+#identify each set of samples
+pop1.samps<-colnames(conv.mat)[gsub("_.*","", colnames(conv.mat)) == "pop1"]
+pop2.samps<-colnames(conv.mat)[gsub("_.*","", colnames(conv.mat)) == "pop2"]
+hybrid.samps<-colnames(conv.mat)[gsub("_.*","", colnames(conv.mat)) == "hybrid"]
+#introduce optional downsampling here:
+if(!is.null(pop1.sample.num)){pop1.samps<-sample(pop1.samps, pop1.sample.num)}
+if(!is.null(pop2.sample.num)){pop2.samps<-sample(pop2.samps, pop2.sample.num)}
+if(!is.null(hybrid.sample.num)){hybrid.samps<-sample(hybrid.samps, hybrid.sample.num)}
+#trim matrix based on optional downsampling
+conv.mat<-conv.mat[,colnames(conv.mat) %in% pop1.samps | colnames(conv.mat) %in% pop2.samps | colnames(conv.mat) %in% hybrid.samps]
+
+#define boolean vectors to isolate each pop from the columns of the dataframe with short, understandable variable names
+p1<-colnames(conv.mat) %in% pop1.samps
+p2<-colnames(conv.mat) %in% pop2.samps
+hyb<-colnames(conv.mat) %in% hybrid.samps
+
+#calculate allele frequency in each parental pop
+pop1.af<-(rowSums(conv.mat[,p1], na.rm=T)/(rowSums(is.na(conv.mat[,p1]) == FALSE)))/2
+pop2.af<-(rowSums(conv.mat[,p2], na.rm=T)/(rowSums(is.na(conv.mat[,p2]) == FALSE)))/2
+
+#find fixed SNPs
+diff<-abs(pop1.af - pop2.af)
+#hist(pop1.af)
+#hist(pop2.af)
+#hist(diff)
+#how many SNPs are fixed
+#table(is.na(diff) == FALSE & diff == 1)
+#isolate dataframe of SNPs fixed different between parentals
+fixed.diffs<-conv.mat[is.na(diff) == FALSE & diff == 1,]
+
+#make gen.mat for triangle plot input
+gen.mat<-fixed.diffs
+gen.mat[gen.mat == 0]<-"0/0"
+gen.mat[gen.mat == 1]<-"0/1"
+gen.mat[gen.mat == 2]<-"1/1"
+
+#write a logical test to convert genotypes so that a 0 always represents the pop1 allele 
+for (i in 1:nrow(gen.mat)){
+  #if 1 is the pop1 allele (ie, frequency in the pop1 samples used for identifying informative SNPs ==1)
+if(sum(fixed.diffs[i,p1],na.rm=T)/sum(is.na(fixed.diffs[i,p1]) == FALSE)/2 == 1){
+  #swap all '0/0' cells in this row with '2/2'
+    gen.mat[i,][gen.mat[i,] == "0/0"]<-"2/2"
+    #swap all '1/1' cells in this row with '0/0'
+    gen.mat[i,][gen.mat[i,] == "1/1"]<-"0/0"
+    #finally convert all '2/2' cells (originally 0/0) in this row into '1/1'
+    gen.mat[i,][gen.mat[i,] == "2/2"]<-"1/1"
+    #no need to touch hets
+  }
+}
+
+#reorder fixed diffs
+fixed.diffs<-gen.mat
+fixed.diffs[fixed.diffs == "0/0"]<-0
+fixed.diffs[fixed.diffs == "0/1"]<-1
+fixed.diffs[fixed.diffs == "1/1"]<-2
+#make table numeric
+for (i in 1:ncol(fixed.diffs)){fixed.diffs[,i]<-as.numeric(fixed.diffs[,i])}
+
+#convert R class NAs to the string "NA/NA"
+gen.mat[is.na(gen.mat) == TRUE]<-"NA/NA"
+
+#make locus info df
+locus.info<-data.frame(locus=rownames(gen.mat),
+                       type=rep("C", times=nrow(gen.mat)),
+                       lg=1,
+                       marker.pos=gsub(".*_","",rownames(gen.mat)))
+
+#we now have a gt matrix in proper format for introgress
+#convert genotype data into a matrix of allele counts
+count.matrix<-prepare.data(admix.gen=gen.mat, loci.data=locus.info,parental1="0",parental2="1", pop.id=F,ind.id=F, fixed=T)
+
+#estimate hybrid index values
+#hi.index.sim<-est.h(introgress.data=count.matrix,loci.data=locus.info,fixed=T, p1.allele="0", p2.allele="1")
+#est.h() function is too slow and we don't need confidence intervals, so we will just use this simple approach:
+hi.index.sim<-data.frame(sample=colnames(fixed.diffs),h=colSums(fixed.diffs)/nrow(fixed.diffs)/2)
+
+#make plot
+mk.image(introgress.data=count.matrix, loci.data = locus.info,
+         hi.index=hi.index.sim, ylab.image="Individuals",
+         marker.order=order(locus.info$lg), xlab.h="population 1 ancestry", pdf=F,
+         col.image=c("#B2182B","black","#4D4D4D"))
+
+#calculate mean heterozygosity across these diagnostic markers for each sample
+#using their function
+het<-calc.intersp.het(introgress.data=count.matrix)
+#make triangle plot
+#introgress::triangle.plot(hi.index=hi.index.sim, int.het=het, pdf = F) #using introgress function
+plot(x=hi.index.sim$h, y=het, main=paste0("samles: pop1 = ",pop1.sample.num,", pop2 = ",pop2.sample.num),
+     bg=gsub("pop2","blue",gsub("pop1","red",gsub("hybrid","purple",gsub("_.*","",colnames(gen.mat))))),
+     pch=21, cex=1.5,
+     xlab="Hybrid Index", ylab="Interspecific heterozygosity",
+     ylim=c(0,1))
+legend(.85, .85, legend=c("pop1", "pop2", "hybrid"), pch=21,
+      pt.bg=c("red", "blue", "purple"), cex=1)
+segments(x0 =0, y0 =0, x1 =.5, y1 =1)
+segments(x0 =1, y0 =0, x1 =.5, y1 =1)
+
+return(gen.mat)
+}
+```
+
+### simulation chunk
+```{r}
+#define each population
+pop1 <- population("pop1", time = 1, N = 1000)
+pop2 <- population("pop2", time = 49, N = 1000, parent = pop1)
+
+#compile the model
+model <- compile_model(populations = list(pop1,pop2),
+                       generation_time = 1,
+                       sim_length = 1050,
+                       path = "~/Desktop/hybrid.sims/slendr.output/1K",
+                       overwrite = TRUE, force = TRUE)
+
+#plot the model to make sure you set it up correctly
+plot_model(model, sizes = TRUE, proportions = TRUE)
+
+#schedule sampling
+present_samples <- schedule_sampling(model, times = 1050, list(pop1, 1000), list(pop2, 1000), strict = TRUE)
+present_samples
+
+#sim the model in msprime
+msprime(model, sequence_length = 1e7, recombination_rate = 1e-8, sampling = present_samples, random_seed = 314)
+
+#check out resulting trees
+ts_file <- file.path(model$path, "output_msprime.trees")
+file.exists(ts_file)
+
+#load in tree sequence
+ts <- ts_load(model)
+ts
+ts_coalesced(ts) #confirm coalescence
+
+#add mutations to simulation
+ts <- ts_mutate(ts, mutation_rate = 1e-8, random_seed = 3141)
+
+#write out vcf
+ts_vcf(ts, path = "~/Desktop/hybrid.sims/slendr.output/1K/output.vcf.gz")
+```
+
+### prepare input file for testing 
+```{r}
+#read in vcf
+vcfR<-read.vcfR("~/Desktop/hybrid.sims/slendr.output/1K/output.vcf.gz")
+vcfR
+#convert '|' to the more standard character '/'
+vcfR@gt<-gsub("[^[:alnum:]]","/",vcfR@gt)
+#filter for biallelic only
+vcfR<-filter_biallelic(vcfR)
+table(vcfR@gt)
+
+#calc FST between parentals
+ts_fst(ts, sample_sets = list(pop1 = colnames(vcfR@gt)[2:1001],pop2 = colnames(vcfR@gt)[1002:2001]))
+
+#extract genotype.matrix
+gm<-extract.gt(vcfR)
+```
+
+### use function to assess false positive called fixed differences based on sampling schemes
+```{r}
+#try some reasonable values for sampling parentals
+for (i in c(50,20,10,8,5,3,2)){
+  assess_fixed_diffs(gm, pop1.sample.num = i, pop2.sample.num = i)
+}
+```
+
+### Add F1 hybrids to the genotype matrix
+```{r}
+#add 25 F1 hybrids to the dataset
+hyb.genos<-data.frame(locus=rownames(gm))
+for (i in 1:25){
+hap1<-substr(gm[,sample(1:1000, 1)],1,1)
+hap2<-substr(gm[,sample(1001:2000,1)],1,1)
+hyb.genos[,i+1]<-paste(hap1,hap2,sep="/")
+}
+colnames(hyb.genos)<-gsub("V","hybrid_",colnames(hyb.genos))
+gm.hybs<-cbind(gm, as.matrix(hyb.genos[,2:26]))
+dim(gm.hybs)
+```
+
+### investigate the effect of sampling regime on triangle plot with F1s
+```{r}
+#run the function to try downsampling the parental achor points and see how it affects the triangle plots
+for (i in c(20,15,10,8,5,3,2)){
+  make_tri_plot(geno.matrix = gm.hybs, pop1.sample.num = i, pop2.sample.num = i, hybrid.sample.num = 25)
+}
+```
